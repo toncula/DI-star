@@ -2,6 +2,7 @@ import argparse
 import os
 import shutil
 import torch
+import multiprocessing as mp
 
 from distar.actor import Actor
 import warnings
@@ -20,7 +21,7 @@ def get_args():
                         help='must specify model path'
                         )
     parser.add_argument('--cpu', action="store_true", help='use cpu inference')
-    parser.add_argument('--game_type', type=str, default='human_vs_agent')
+    parser.add_argument('--game_type', type=str, default='agent_vs_agent')
     return parser.parse_args()
 
 
@@ -41,7 +42,7 @@ if __name__ == '__main__':
     user_config.actor.job_type = 'eval_test'
     user_config.common.type = 'play'
     user_config.actor.episode_num = 1
-    user_config.env.realtime = True
+    user_config.env.realtime = False
     args = get_args()
     default_model_path = os.path.join(os.path.dirname(__file__), 'rl_model.pth')
     if args.model1 is not None:

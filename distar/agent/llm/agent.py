@@ -1,3 +1,4 @@
+# llm agent,
 import copy
 import json
 import os
@@ -17,14 +18,15 @@ from collections import deque, defaultdict
 from functools import partial
 from torch.utils.data._utils.collate import default_collate
 
-from .model.model import Model
-from .lib.actions import NUM_CUMULATIVE_STAT_ACTIONS, ACTIONS, BEGINNING_ORDER_ACTIONS, CUMULATIVE_STAT_ACTIONS, UNIT_ABILITY_TO_ACTION, QUEUE_ACTIONS, UNIT_TO_CUM, UPGRADE_TO_CUM
-from .lib.features import Features, SPATIAL_SIZE, BEGINNING_ORDER_ACTIONS, CUMULATIVE_STAT_ACTIONS, BEGINNING_ORDER_LENGTH, ScoreCategories, compute_battle_score, fake_step_data, fake_model_output
-from .lib.stat import Stat, cum_dict
+from ..default.model.model import Model
+from ..default.lib.actions import NUM_CUMULATIVE_STAT_ACTIONS, ACTIONS, BEGINNING_ORDER_ACTIONS, CUMULATIVE_STAT_ACTIONS, UNIT_ABILITY_TO_ACTION, QUEUE_ACTIONS, UNIT_TO_CUM, UPGRADE_TO_CUM
+from ..default.lib.features import Features, SPATIAL_SIZE, BEGINNING_ORDER_ACTIONS, CUMULATIVE_STAT_ACTIONS, BEGINNING_ORDER_LENGTH, ScoreCategories, compute_battle_score, fake_step_data, fake_model_output
+from ..default.lib.stat import Stat, cum_dict
 from distar.ctools.torch_utils.metric import levenshtein_distance, hamming_distance, l2_distance
-from distar.pysc2.lib.units import get_unit_type
+from distar.pysc2.lib.units import get_unit_type,get_unit_id
 from distar.pysc2.lib.static_data import UNIT_TYPES, NUM_UNIT_TYPES
 from distar.ctools.torch_utils import to_device
+from distar.agent.llm.llm_select import llm_select,llm_summarize
 
 RACE_DICT = {
     1: 'terran',
@@ -162,12 +164,13 @@ class Agent:
         self._game_step = 0  # step * 10 is game duration time
         self._behaviour_building_order = [] # idx in BEGINNING_ORDER_ACTIONS
         self._behaviour_bo_location = []
+        self.bo_location = None
         self._bo_zergling_count = 0
         self._behaviour_cumulative_stat = [0] * NUM_CUMULATIVE_STAT_ACTIONS
         self._feature = Features(game_info, obs['raw_obs'], self._whole_cfg)
         self._exceed_flag = True
-        #是否询问llm
-        self._ask_llm = False
+        # 是否询问llm
+        self.ask_llm = True
 
         if 'train' in self._job_type:
             self._hidden_state_backup = [(torch.zeros(self._hidden_size), torch.zeros(self._hidden_size)) for _ in range(self._num_layers)]
@@ -207,9 +210,9 @@ class Agent:
         else:
             z = random.choice(z_data[self._map_name][mix_race][born_location_str])
         if len(z) == 5:
-            self._target_building_order, target_cumulative_stat, bo_location, self._target_z_loop, z_type = z
+            self._target_building_order, target_cumulative_stat, self.bo_location, self._target_z_loop, z_type = z
         else:
-            self._target_building_order, target_cumulative_stat, bo_location, self._target_z_loop = z
+            self._target_building_order, target_cumulative_stat, self.bo_location, self._target_z_loop = z
         self.use_cum_reward = True
         self.use_bo_reward = True
         if z_type is not None:
@@ -230,7 +233,7 @@ class Agent:
                 a = self._target_building_order[idx]
                 if a != 0:
                     action_type = BEGINNING_ORDER_ACTIONS[a]
-                    x, y = bo_location[idx] % 160, bo_location[idx] // 160
+                    x, y = self.bo_location[idx] % 160, self.bo_location[idx] // 160
                     s += '  {}, ({}, {})\n'.format(ACTIONS[action_type]['name'], x, y)
             s += 'Cumulative stat:\n'
             for i in target_cumulative_stat:
@@ -239,7 +242,7 @@ class Agent:
             print(s)
         self._bo_norm = len(self._target_building_order)
         self._cum_norm = len(target_cumulative_stat)
-        self._target_bo_location = torch.tensor(bo_location, dtype=torch.long)
+        self._target_bo_location = torch.tensor(self.bo_location, dtype=torch.long)
         self._target_building_order = torch.tensor(self._target_building_order, dtype=torch.long)
         self._target_cumulative_stat = torch.zeros(NUM_CUMULATIVE_STAT_ACTIONS, dtype=torch.float)
         self._target_cumulative_stat.scatter_(index=torch.tensor(target_cumulative_stat, dtype=torch.long), dim=0, value=1.)
@@ -304,17 +307,43 @@ class Agent:
             model_input = default_collate([agent_obs])
         return model_input
 
-    def step(self, observation):
+    def _llm_pre_process(self,obs):
+        player_common  = obs['raw_obs'].observation.player_common
+        visible_units = [unit for unit in obs['raw_obs'].observation.raw_data.units if unit.display_type == 1]#Visible
+
+        # will add more in future
+        return player_common,visible_units
+
+
+    def step(self, observation,LLM_input = None):
         if 'eval' in self._job_type and self._iter_count > 0 and not self._whole_cfg.env.realtime:
             self._update_fake_reward(self._last_action_type, self._last_location, observation)
         model_input = self._pre_process(observation)
-        # self._stat_api.update(self._last_action_type, observation['action_result'][0], self._observation, self._game_step)
+        if self.ask_llm == True and LLM_input is not None:
+            player_common, visible_units = self._llm_pre_process(observation)
+            llm_sum = llm_summarize(player_common,visible_units)
+        self._stat_api.update(self._last_action_type, observation['action_result'][0], self._observation, self._game_step)
         if not self._gpu_batch_inference:
-            model_output = self.model.compute_logp_action(**model_input)
-            # for i in range(20):
-            #     fake_model_output = self.model.compute_logp_action(**model_input)
-            #     action = self._post_process(fake_model_output)
-            #     print(action)
+            if self.ask_llm == True and LLM_input is not None:
+                selected_model_outputs = []
+                transformed_actions = []
+                for i in range(20):
+                    selected_model_output = self.model.compute_logp_action(**model_input)
+                    selected_model_outputs.append(selected_model_output)
+                    s = self._fake_post_process(selected_model_output)
+
+                    transformed_actions.append(
+                        s
+                    )
+
+                llm_select_index = llm_select(
+                    transformed_actions, LLM_input, self._born_location,llm_sum
+                )
+                action = self._post_process(selected_model_outputs[llm_select_index])
+            else:
+                model_output = self.model.compute_logp_action(**model_input)
+                action = self._post_process(model_output)
+
         else:
             while True:
                 if self._signals[self._env_id] == 0:
@@ -322,7 +351,7 @@ class Agent:
                     break
                 else:
                     time.sleep(0.01)
-        action = self._post_process(model_output)
+
         self._iter_count += 1
         return action
 
@@ -397,8 +426,60 @@ class Agent:
             self._print_action(output['action_info'], [x, y], output['action_logp'])
         return [action_info]
 
-    
+    def _fake_post_process(self, output):
+        if self._gpu_batch_inference:
+            output = self.decollate_output(output, batch_idx=self._env_id)
+        else:
+            output = self.decollate_output(output)
 
+        # self._hidden_state = output["hidden_state"]
+        # self._last_queued = output["action_info"]["queued"]
+        # self._last_action_type = output["action_info"]["action_type"]
+        # self._last_delay = output["action_info"]["delay"]
+        # self._last_location = output["action_info"]["target_location"]
+        # self._output = output
+
+        # action_info = {'func_id': 0, 'skip_steps': 0, 'queued': 0, 'unit_tags': [0, 1], 'target_unit_tag': 0,
+        #                'location': [0, 0]}
+        action_info = {}
+        action_info["func_id"] = ACTIONS[output["action_info"]["action_type"].item()][
+            "func_id"
+        ]
+        action_info["skip_steps"] = output["action_info"]["delay"].item()
+        action_info["queued"] = output["action_info"]["queued"].item()
+        action_info["unit_tags"] = []
+        for i in range(output["selected_units_num"] - 1):
+            try:
+                action_info["unit_tags"].append(
+                    self._game_info["tags"][
+                        output["action_info"]["selected_units"][i].item()
+                    ]
+                )
+            except:
+                print()
+        if self._extra_units:
+            extra_units = torch.nonzero(output["extra_units"]).squeeze(dim=1).tolist()
+            for unit_index in extra_units:
+                action_info["unit_tags"].append(self._game_info["tags"][unit_index])
+
+        if ACTIONS[output["action_info"]["action_type"].item()]["selected_units"]:
+            self._last_selected_unit_tags = action_info["unit_tags"]
+        else:
+            self._last_selected_unit_tags = None
+        action_info["target_unit_tag"] = self._game_info["tags"][
+            output["action_info"]["target_unit"].item()
+        ]
+        if ACTIONS[output["action_info"]["action_type"].item()]["target_unit"]:
+            self._last_target_unit_tag = action_info["target_unit_tag"]
+        else:
+            self._last_target_unit_tag = None
+        x = output["action_info"]["target_location"].item() % SPATIAL_SIZE[1]
+        y = output["action_info"]["target_location"].item() // SPATIAL_SIZE[1]
+        inverse_y = max(self._feature.map_size.y - y, 0)
+        action_info["location"] = (x, inverse_y)
+        if "test" in self._job_type:
+            s = self.transform_action(output["action_info"], [x, y], output["action_logp"])
+        return s
     def get_unit_num_info(self):
         return {'unit_num': self._stat_api.unit_num}
 
@@ -422,6 +503,45 @@ class Agent:
         tu_logp = torch.exp(logp['target_unit']).item()
         s = f'{self.player_id}, game_step:{self._game_step}, at:{action_name}({at_logp:.2f}), delay:{delay}({delay_logp:.2f}), su:({su_len}){selected_units}, tu:{target_unit}({tu_logp:.2f}), lo:{location}({tl_logp:.2f})'
         print(s)
+
+    def transform_action(self, action_info, location, logp):
+        action_type = action_info["action_type"].item()
+        action_name = ACTIONS[action_type]["name"]
+        selected_units = ""
+        su_len = len(action_info["selected_units"])
+        if ACTIONS[action_type]["selected_units"]:
+            for i, u in enumerate(action_info["selected_units"][:-1].tolist()):
+                selected_units += (
+                    " "
+                    + get_unit_id(str(
+                        get_unit_type(
+                            UNIT_TYPES[self._observation["entity_info"]["unit_type"][u]]
+                        )
+                    ).split(".")[-1])
+                    + "({:.2f})".format(torch.exp(logp["selected_units"][i]).item())
+                )
+            selected_units += " " + "end({:.2f})".format(
+                torch.exp(logp["selected_units"][-1]).item()
+            )
+        # unit_types = set(self._observation['entity_info']['unit_type'][action_info['selected_units'][:-1]].tolist())
+        target_unit = None
+        if ACTIONS[action_type]["target_unit"]:
+            target_unit = get_unit_id(str(
+                get_unit_type(
+                    UNIT_TYPES[
+                        self._observation["entity_info"]["unit_type"][
+                            action_info["target_unit"].item()
+                        ]
+                    ]
+                )
+            ).split(".")[-1])
+        delay = action_info["delay"]
+        at_logp = torch.exp(logp["action_type"]).item()
+        delay_logp = torch.exp(logp["delay"]).item()
+        tl_logp = torch.exp(logp["target_location"]).item()
+        tu_logp = torch.exp(logp["target_unit"]).item()
+        s = f"{self.player_id}, game_step:{self._game_step}, at:{action_name}({at_logp:.2f}), delay:{delay}({delay_logp:.2f}), su:({su_len}){selected_units}, tu:{target_unit}({tu_logp:.2f}), lo:{location}({tl_logp:.2f})"
+        return s
 
     def get_stat_data(self):
         data = self._stat_api.get_stat_data()

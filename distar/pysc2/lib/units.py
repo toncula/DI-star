@@ -293,8 +293,18 @@ class Zerg(enum.IntEnum):
 
 
 def get_unit_type(unit_id):
-  for race in (Neutral, Protoss, Terran, Zerg):
-    try:
-      return race(unit_id)
-    except ValueError:
-      pass  # Wrong race.
+    for race in (Neutral, Protoss, Terran, Zerg):
+        try:
+            return race(unit_id)
+        except ValueError:
+            pass  # Wrong race.
+
+
+def get_unit_id(unit_type):
+    # Check all races
+    for race in (Neutral, Protoss, Terran, Zerg):
+        # Iterate through all members of the enum class
+        for name, member in race.__members__.items():
+            if member.value == int(unit_type):
+                return name
+    raise ValueError("No matching unit_id found for the given unit_type.")

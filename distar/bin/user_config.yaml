@@ -18,11 +18,11 @@ actor:
   episode_num: 1  # episode number
   print_freq: 1000  # log frequency in actor log
   traj_len: 2  # trajectory length
-  use_cuda: False  # whether to use gpu in 'train_test' or 'eval_test'
+  use_cuda: True  # whether to use gpu in 'train_test' or 'eval_test'
   fake_model: False # if True, skip model loading 
   player_ids: ['model1', 'model2']  # player ids used in RL
   agents: 
-    model1: 'default'  # key is one of player_ids, value is agent name
+    model1: 'llm'  # key is one of player_ids, value is agent name
     model2: 'default'  
   model_paths:
     model1: *model_path  # key is one of player_ids, value is model checkpoint path
@@ -31,7 +31,7 @@ actor:
   teacher_model_paths:  
     haha: 'haha.pth.tar'  # key is one of teacher player ids
 env:
-  map_name: 'random'  # one of ['KairosJunction', 'KingsCove', 'NewRepugnancy'], random mean a random map from these three
+  map_name: 'KairosJunction'  # one of ['KairosJunction', 'KingsCove', 'NewRepugnancy'], random mean a random map from these three
   player_ids: ['agent1', 'bot10']  # player ids shown in game and replay, bot0 - bot10 means built-in bots
   races: ['zerg', 'zerg']  # player races
   map_size_resolutions: [True, True] # if True, ignore minimap_resolutions
@@ -40,4 +40,4 @@ env:
   replay_dir: '.'  # where to save replay, '.' means saved at current working directory
   game_steps_per_episode: 100000  # maximum length in one game, the game will end when it reaches the game step
   update_both_obs: False  # request opponent's observation in own observation
-  version: '4.10.0'  # SC2 game version
+  version: 'latest'  # SC2 game version

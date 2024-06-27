@@ -17,7 +17,7 @@ actor:
   fake_model: False # if True, skip model loading
   player_ids: ['haha']
   agents:
-    haha: 'default'
+    haha: 'llm' #'default'
   model_paths:
     haha: 'D:\remote\fix_game_loop_iteration_50000.pth.tar'
   teacher_player_ids: ['haha', 'haha']
